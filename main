@@ -1,0 +1,174 @@
+import numpy as np
+from scipy.linalg import svd
+import scipy.io
+import numpy as np
+from scipy.linalg import eig
+from scipy.linalg import svd
+
+
+
+Train_labels = label_nums_train   ############## 改成你需要的data
+Test_labels = label_nums_test
+Train_data = signal_mfccs_train
+Test_data = signal_mfccs_test
+
+# Convert the cell array to a list of NumPy arrays
+Train_data = [np.array(item) for item in Train_data[0]]
+# Stack the list of NumPy arrays to create a single NumPy array
+Train_data = np.stack(Train_data, axis=0)
+
+# Convert the cell array to a list of NumPy arrays
+Test_data = [np.array(item) for item in Test_data[0]]
+# Stack the list of NumPy arrays to create a single NumPy array
+Test_data = np.stack(Test_data, axis=0)
+# Print the shape of the resulting array
+
+def compute_sub(data):
+    num_t = len(data)
+    sub_t = []
+    q_value = 4  # 调整为您的CV问题和数据集
+
+    for i in range(num_t):
+        sample_t_c = data[i] / 255.0
+        cov_t = np.dot(sample_t_c, sample_t_c.T)
+        U, _, _ = svd(cov_t, full_matrices=False)
+        sub_t.append(U[:, :q_value])
+
+    return sub_t, q_value
+
+[train_Gras,q1]=compute_sub(Train_data)
+
+[test_Gras,q2]= compute_sub(Test_data)
+
+# Assuming train_Gras is a list of covariance matrices
+num_matrices = len(train_Gras)
+kmatrix_train = np.zeros((num_matrices, num_matrices))
+
+for i in range(num_matrices):
+    for j in range(i, num_matrices):
+        cov_i_Train = train_Gras[i]
+        cov_j_Train = train_Gras[j]
+        temp_i = np.dot(cov_i_Train, cov_i_Train.T)
+        temp_j = np.dot(cov_j_Train, cov_j_Train.T)
+        kmatrix_train[i, j] = np.trace(np.dot(temp_i, temp_j))
+        kmatrix_train[j, i] = kmatrix_train[i, j]
+kmatrix_train=kmatrix_train/10000
+
+
+num_cov_train = len(train_Gras)
+num_cov_test = len(test_Gras)
+
+# Initialize kmatrix_test with zeros
+kmatrix_test = np.zeros((num_cov_train, num_cov_test))
+
+for i in range(num_cov_train):
+    cov_i_Train = train_Gras[i]
+
+    for j in range(num_cov_test):
+        cov_j_Test = test_Gras[j]
+        temp_i = np.dot(cov_i_Train, cov_i_Train.T)
+        temp_j = np.dot(cov_j_Test, cov_j_Test.T)
+        kmatrix_test[i, j] = np.trace(np.dot(temp_i, temp_j))
+kmatrix_test =kmatrix_test/ 10000
+
+def fun_SymNet_Train(options,gnd,data):
+
+    import numpy as np
+
+
+    options={'Regu':0.01}
+    K = data.copy()
+    K = np.maximum(K, K.T)
+
+    nSmp = K.shape[0]
+    if len(gnd) != nSmp:
+        raise ValueError('gnd and data mismatch!')
+
+    classLabel = np.unique(gnd)
+    nClass = len(classLabel)
+    Dim = nClass - 1
+
+    K_orig = K.copy()
+
+    sumK = np.sum(K, axis=1)
+    H = np.tile(sumK/ nSmp, (nSmp,1)).T
+    K = K - H - H.T + np.sum(sumK) / (nSmp**2)
+    K = np.maximum(K, K.T)
+
+
+    Hb = np.zeros((nClass, nSmp))
+    for i in range(nClass):
+        index = np.where(gnd == classLabel[i])[0]
+        classMean = np.mean(K[index], axis=0)
+        Hb[i, :] = np.sqrt(len(index)) * classMean
+    B = np.dot(Hb.T, Hb)
+    T = np.dot(K, K)
+
+    for i in range(T.shape[0]):
+        T[i, i] = T[i, i] + options['Regu']
+
+    B = np.maximum(B, B.T)
+    T = np.maximum(T, T.T)
+
+    option = {'disp': 0}
+    eigvalues, eigvectors = eig(B, T)
+
+    # 对特征值进行降序排序
+    sorted_indices = np.argsort(eigvalues)[::-1]
+    eigvalues = eigvalues[sorted_indices]
+    eigvectors = eigvectors[:, sorted_indices]
+
+    # 选择前Dim个特征值和特征向量
+    Dim = nClass - 1  # 您可能需要根据您的需求设置Dim的值
+    eigvalues = eigvalues[:Dim]
+    eigvectors = eigvectors[:, :Dim]
+
+    eigvalues = np.real(eigvalues)
+    eigvectors = np.real(eigvectors)
+
+    # eigvectors = scipy.io.loadmat('eigvectors.mat')['eigvector']  #测试代码一致性
+
+    inner_product = np.dot(eigvectors.T, K_orig) * eigvectors.T
+    sum_inner_product = np.sum(inner_product, axis=1)
+    # tmpNorm = np.sqrt(sum_inner_product)
+    tmpNorm = np.sqrt(np.abs(sum_inner_product))
+    # 对特征向量进行标准化
+    tmpNorm_transpose = tmpNorm[:, np.newaxis].T
+    # 对特征向量进行标准化
+    eigvectors /= tmpNorm_transpose
+
+    return eigvectors, eigvalues
+
+# 示例用法
+gnd = Train_labels[0, :]
+# 设置正则化参数
+options = {}
+options = {'Regu': 1}
+
+eigvectors, eigvalues=fun_SymNet_Train(options,gnd,kmatrix_train)
+
+classLabel = np.unique(gnd)
+nClass = len(classLabel)
+Dim = nClass - 1
+kk = Dim
+alpha_matrix = eigvectors[:, :kk]
+# 计算 data_DR_train 和 data_DR_test
+data_DR_train = np.dot(alpha_matrix.T, kmatrix_train)
+data_DR_test = np.dot(alpha_matrix.T, kmatrix_test)
+
+from sklearn.neighbors import KNeighborsClassifier
+import numpy as np
+
+# 训练KNN分类模型
+mdl = KNeighborsClassifier(n_neighbors=1)  # 使用1个最近邻的样本进行分类
+mdl.fit(data_DR_train.T, Train_labels.ravel())  # 调整训练数据的形状并训练模型
+# 对测试数据进行分类预测
+Class = mdl.predict(data_DR_test.T)
+# 计算正确分类的测试样本数量
+accuracy_number = np.sum(Class == Test_labels)
+# 计算分类准确度
+accuracy = accuracy_number / data_DR_test.shape[1]
+# 打印结
+print(f'the right classified test samples are: {accuracy_number}')
+print(f'the classification accuracy is: {accuracy * 100:.4f}%')
+
